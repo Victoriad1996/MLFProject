@@ -20,6 +20,7 @@ def create_mixed_dataset(
     :return: str (path where the dataset is saved), int (time_id to identify
                 the dataset)
     """
+
     df_overview, data_overview = get_dataset_overview()
 
     np.random.seed(seed=seed)
@@ -29,6 +30,8 @@ def create_mixed_dataset(
     #generate the trajectories with the first volatility coefficient
     stockmodel = _STOCK_MODELS[stock_model_name](**hyperparam_dict)
     stock_paths0, dt = stockmodel.generate_paths()
+
+    hyperparam_dict['nb_paths'] = int(hyperparam_dict['nb_paths']/2)
     
     #generate the trajectories with volatility coefficient vol1
     hyperparam_dict['volatility'] = vol1
@@ -40,13 +43,15 @@ def create_mixed_dataset(
 
     #add label for the trajectories with the different coeffs
     labels = np.concatenate((np.zeros((hyperparam_dict['nb_paths'])),np.ones((hyperparam_dict['nb_paths']))),axis = 0)
+
+    hyperparam_dict['nb_paths'] = int(2*hyperparam_dict['nb_paths'])
     
     size = stock_paths.shape
     observed_dates = np.random.random(size=(size[0], size[2]))
     observed_dates = (observed_dates < obs_perc)*1
     nb_obs = np.sum(observed_dates[:, 1:], axis=1)
     time_id = int(time.time())
-    file_name = '{}-{}-{}'.format(stock_model_name,'mixed', time_id)
+    file_name = '{}_{}-{}'.format(stock_model_name,'mixed', time_id)
     path = '{}{}/'.format(training_data_path, file_name)
     desc = json.dumps(hyperparam_dict, sort_keys=True)
     if os.path.exists(path):
