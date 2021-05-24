@@ -131,17 +131,10 @@ LOSS_FUN_DICT = {
     'easy': compute_loss_2,
 }
 
-'''
-CL_LOSS_FUN_DICT = {
-    'cross-entropy': compute_loss_CE
-}
-'''
-
 nonlinears = {
     'tanh': torch.nn.Tanh,
     'relu': torch.nn.ReLU
 }
-
 
 
 def get_ffnn(input_size, output_size, nn_desc, dropout_rate, bias):
@@ -290,7 +283,7 @@ class NJODE(torch.nn.Module):
     """
     def __init__(
             self, input_size, hidden_size, output_size,
-            ode_nn, readout_nn, readout2_nn, enc_nn, use_rnn,
+            ode_nn, readout_nn, enc_nn, use_rnn,
             bias=True, dropout_rate=0, solver="euler",
             weight=0.5, weight_decay=1.,
             **options
@@ -302,7 +295,6 @@ class NJODE(torch.nn.Module):
         :param output_size: int
         :param ode_nn: list of list, defining the NN f, see get_ffnn
         :param readout_nn: list of list, defining the NN g, see get_ffnn
-        :param readout_nn: list of list, defining the classifier NN, see get_ffnn
         :param enc_nn: list of list, defining the NN e, see get_ffnn
         :param use_rnn: bool, whether to use the RNN for 'jumps'
         :param bias: bool, whether to use a bias for the NNs
@@ -358,9 +350,6 @@ class NJODE(torch.nn.Module):
         self.readout_map = FFNN(
             hidden_size, output_size, readout_nn, dropout_rate, bias, 
             residual=self.residual_enc_dec)
-        self.readout_classif = FFNN(
-        	hidden_size, 2, readout2_nn, dropout_rate, bias, 
-        	residual=self.residual_enc_dec)
         if self.use_rnn:  # TODO: implement that also this can be used with mask
             self.obs_c = GRUCell(input_size, hidden_size, bias=bias)
 
@@ -388,7 +377,7 @@ class NJODE(torch.nn.Module):
         return h, current_time
 
     def forward(self, times, time_ptr, X, obs_idx, delta_t, T, start_X,
-                n_obs_ot, labels, return_path=False, get_loss=True, until_T=False,
+                n_obs_ot, return_path=False, get_loss=True, until_T=False,
                 M=None):
         """
         the forward run of this module class, used when calling the module
@@ -521,26 +510,16 @@ class NJODE(torch.nn.Module):
                     path_h.append(h)
                     path_y.append(self.readout_map(h))
 
-        Y_label_out = self.readout_classif(h)
-        ce_loss = torch.nn.CrossEntropyLoss()
-        labels = labels.type(torch.LongTensor)
-        labels_pred = torch.argmax(Y_label_out, dim=1)
-
-        nb_correct = int(torch.sum(labels_pred == labels))
-        batch_acc  = nb_correct / batch_size
-        loss = loss + ce_loss(Y_label_out, labels)
-
-
         if return_path:
             # path dimension: [time_steps, batch_size, output_size]
-            return h, loss, batch_acc, np.array(path_t), torch.stack(path_h), \
+            return h, loss, np.array(path_t), torch.stack(path_h), \
                    torch.stack(path_y)
         else:
-            return h, loss, batch_acc
+            return h, loss
 
 
     def evaluate(self, times, time_ptr, X, obs_idx, delta_t, T, start_X, 
-                 n_obs_ot, labels, stockmodel, cond_exp_fun_kwargs=None,
+                 n_obs_ot, stockmodel, cond_exp_fun_kwargs=None,
                  diff_fun=lambda x,y: np.mean((x-y)**2),
                  return_paths=False, M=None):
         """
@@ -565,8 +544,8 @@ class NJODE(torch.nn.Module):
         :return: eval-loss, if wanted paths t, y for true and pred
         """
         self.eval()
-        _, _, _, path_t, path_h, path_y = self.forward(
-            times, time_ptr,X,obs_idx, delta_t, T, start_X, None, labels,
+        _, _, path_t, path_h, path_y = self.forward(
+            times, time_ptr,X,obs_idx, delta_t, T, start_X, None, 
             return_path=True, get_loss=False, until_T=True, M=M)
 
         loss, true_path_t, true_path_y = stockmodel.compute_cond_exp(
@@ -603,7 +582,356 @@ class NJODE(torch.nn.Module):
                                                     get_loss=False,
                                                     until_T=True, M=M)
         return {'pred': path_y, 'pred_t': path_t}
-    
+
+## Modified NJODE
+
+
+class DFFNN_classification(torch.nn.Module):
+    """
+    Implements Deep feed-forward neural network for classification with:
+    :param n_layers: number of layers
+    :param n_hidden: number of hidden units
+    :param activation: activation function
+    :param input_size: input size
+    """
+    def __init__(self, n_layers, n_hidden, activation, input_size,dropout_rate):
+        super().__init__()
+
+        # create feed-forward NN
+        nn_desc = [[n_hidden, activation] for i in range(n_layers)]
+        self.ffnn = get_ffnn(input_size = input_size, output_size = 2, 
+                                nn_desc = nn_desc, dropout_rate = dropout_rate, bias = True)    
+    def forward(self, nn_input, mask=None):
+
+        out = self.ffnn(torch.tanh(nn_input))
+        
+        out = torch.nn.Softmax()(out)
+        return out 
+
+
+
+class NJODE_classification(torch.nn.Module):
+    """
+    NJ-ODE model
+    """
+    def __init__(
+            self, input_size, hidden_size, output_size,
+            ode_nn, readout_nn, enc_nn, use_rnn,
+            bias=True, dropout_rate=0, solver="euler",
+            weight=0.5, weight_decay=1.,n_layers_classification = 3,
+            activation_classification = 'relu',n_hidden_classification = 100,
+            dropout_rate_classification = 0,
+            **options
+    ):
+        """
+        init the model
+        :param input_size: int
+        :param hidden_size: int, size of latent variable process
+        :param output_size: int
+        :param ode_nn: list of list, defining the NN f, see get_ffnn
+        :param readout_nn: list of list, defining the NN g, see get_ffnn
+        :param enc_nn: list of list, defining the NN e, see get_ffnn
+        :param use_rnn: bool, whether to use the RNN for 'jumps'
+        :param bias: bool, whether to use a bias for the NNs
+        :param dropout_rate: float
+        :param solver: str, specifying the ODE solver, suppoorted: {'euler'}
+        :param weight: float in [0.5, 1], the initial weight used in the loss
+        :param weight_decay: float in [0,1], the decay applied to the weight of
+                the loss function after each epoch, decaying towards 0.5
+                    1: no decay, weight stays the same
+                    0: immediate decay to 0.5 after 1st epoch
+                    (0,1): exponential decay towards 0.5
+        :param n_layers_classification: number of layer for the classification readout network
+        :param activation_calssification: activation function for the classification readout network
+        :param n_hidden_classification: number of hidden units for the classification readout network
+        :param dropout_rate_classification: float
+        :param options: kwargs, used: kword "options" with arg a dict passed
+                from train.train (kwords: 'which_loss', 'residual_enc_dec',
+                'masked', 'input_current_t' are used)
+        """
+        super().__init__()
+
+        self.epoch = 1
+        self.weight = weight
+        self.weight_decay = weight_decay
+        self.use_rnn = use_rnn
+        
+        # get options from the optians of train input
+        options1 = options['options']
+        if 'which_loss' in options1:
+            self.which_loss = options1['which_loss']
+        else:
+            self.which_loss = 'standard'
+        assert self.which_loss in LOSS_FUN_DICT
+        print('using loss: {}'.format(self.which_loss))
+        
+        if 'residual_enc_dec' in options1:
+            self.residual_enc_dec = options1['residual_enc_dec']
+        else:
+            self.residual_enc_dec = True
+
+        if 'input_current_t' in options1:
+            self.input_current_t = options1['input_current_t']
+        else:
+            self.input_current_t = False
+
+        self.masked = False
+        if 'masked' in options1:
+            self.masked = options1['masked']
+        
+        self.ode_f = ODEFunc(
+            input_size, hidden_size, ode_nn, dropout_rate, bias,
+            input_current_t=self.input_current_t)
+        self.encoder_map = FFNN(
+            input_size, hidden_size, enc_nn, dropout_rate, bias,
+            masked=self.masked,
+            residual=self.residual_enc_dec)
+        self.readout_map = FFNN(
+            hidden_size, output_size, readout_nn, dropout_rate, bias, 
+            residual=self.residual_enc_dec)
+        if self.use_rnn:  # TODO: implement that also this can be used with mask
+            self.obs_c = GRUCell(input_size, hidden_size, bias=bias)
+        
+        #####################Modified###########################
+        #TODO: input_size has to be the size of the hidden state variable of the GRUCell
+        self.classification_readout = DFFNN_classification(n_layers_classification, n_hidden_classification, 
+                                        activation_classification, hidden_size,dropout_rate_classification)
+        ########################################################
+        self.solver = solver
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+
+        self.apply(init_weights)
+
+    def weight_decay_step(self):
+        inc = (self.weight - 0.5)
+        self.weight = 0.5 + inc * self.weight_decay
+        return self.weight
+
+    def ode_step(self, h, delta_t, current_time, last_X, tau):
+        """Executes a single ODE step"""
+        if self.solver == "euler":
+            h = h + delta_t * self.ode_f(last_X, h, tau, current_time - tau)
+        else:
+            raise ValueError("Unknown solver '{}'.".format(self.solver))
+
+        current_time += delta_t
+        return h, current_time
+
+    def forward(self, times, time_ptr, X, obs_idx, delta_t, T, start_X,
+                n_obs_ot, label, return_path=False, get_loss=True, until_T=True,
+                M=None):
+        """
+        the forward run of this module class, used when calling the module
+        instance without a method
+        :param times: np.array, of observation times
+        :param time_ptr: list, start indices of X and obs_idx for a given
+                observation time, first element is 0, this pointer tells how
+                many (and which) of the observations of X along the batch-dim
+                belong to the current time, and obs_idx then tells to which of
+                the batch elements they belong. In particular, not each batch-
+                element has to jump at the same time, and only those elements
+                which jump at the current time should be updated with a jump
+        :param X: torch.tensor, data tensor
+        :param obs_idx: list, index of the batch elements where jumps occur at
+                current time
+        :param delta_t: float, time step for Euler
+        :param T: float, the final time
+        :param start_X: torch.tensor, the starting point of X
+        :param n_obs_ot: torch.tensor, the number of observations over the
+                entire time interval for each element of the batch
+        :param return_path: bool, whether to return the path of h
+        :param get_loss: bool, whether to compute the loss, otherwise 0 returned
+        :param until_T: bool, whether to continue until T (for eval) or only
+                until last observation (for training)
+        :param M: None or torch.tensor, if not None: the mask for the data, same
+                size as X, with 0 or 1 entries
+        :return: torch.tensor (hidden state at final time), torch.tensor (loss),
+                    if wanted the paths of t (np.array) and h, y (torch.tensors)
+        """
+
+        if self.masked:
+            h = self.encoder_map(start_X, mask=torch.zeros_like(start_X))
+        else:
+            h = self.encoder_map(start_X)
+
+        last_X = start_X
+        batch_size = start_X.size()[0]
+        tau = torch.tensor([[0.0]]).repeat(batch_size, 1)
+        current_time = 0.0
+
+        loss = 0
+
+        if return_path:
+            path_t = [0]
+            path_h = [h]
+            path_y = [self.readout_map(h)]
+
+        assert len(times) + 1 == len(time_ptr)
+
+        for i, obs_time in enumerate(times):
+            # Propagation of the ODE until next observation
+            while current_time < (obs_time - 1e-10 * delta_t):  # 0.0001 delta_t used for numerical consistency.
+                if current_time < obs_time - delta_t:
+                    delta_t_ = delta_t
+                else:
+                    delta_t_ = obs_time - current_time
+                if self.solver == 'euler':
+                    h, current_time = self.ode_step(h, delta_t_, current_time, 
+                                                    last_X=last_X, tau=tau)
+
+                # Storing the predictions.
+                if return_path:
+                    path_t.append(current_time)
+                    path_h.append(h)
+                    path_y.append(self.readout_map(h))
+
+            # Reached an observation - only update those elements of the batch, 
+            #    for which an observation is made
+            start = time_ptr[i]
+            end = time_ptr[i + 1]
+            X_obs = X[start:end]
+            i_obs = obs_idx[start:end]
+            if self.masked:
+                M_obs = M[start:end]
+            else:
+                M_obs = None
+
+            # Using RNNCell to update h. Also updating loss, tau and last_X
+            Y_bj = self.readout_map(h)
+            if self.use_rnn:
+                h = self.obs_c(h, X_obs, i_obs)
+            else:
+                temp = h.clone()
+                if self.masked:
+                    X_obs_impute = X_obs * M_obs + \
+                                   (torch.ones_like(M_obs) - M_obs)*Y_bj[i_obs]
+                    temp[i_obs] = self.encoder_map(X_obs_impute, M_obs)
+                else:
+                    temp[i_obs] = self.encoder_map(X_obs)
+                h = temp
+            Y = self.readout_map(h)
+            
+            if get_loss:
+                loss = loss + LOSS_FUN_DICT[self.which_loss](
+                    X_obs=X_obs, Y_obs=Y[i_obs], Y_obs_bj=Y_bj[i_obs],
+                    n_obs_ot=n_obs_ot[i_obs], batch_size=batch_size,
+                    weight=self.weight, M_obs=M_obs)
+
+            # make update of last_X and tau, that is not inplace 
+            #    (otherwise problems in autograd)
+            temp_X = last_X.clone()
+            temp_tau = tau.clone()
+            if self.masked:
+                temp_X[i_obs] = Y[i_obs]
+            else:
+                temp_X[i_obs] = X_obs
+            temp_tau[i_obs] = obs_time.astype(np.float64)
+            last_X = temp_X
+            tau = temp_tau
+
+            if return_path:
+                path_t.append(obs_time)
+                path_h.append(h)
+                path_y.append(Y)
+
+        # after every observation has been processed, propagating until T
+        if until_T:
+            while current_time < T - 1e-10 * delta_t:
+                if current_time < T - delta_t:
+                    delta_t_ = delta_t
+                else:
+                    delta_t_ = T - current_time
+                if self.solver == 'euler':
+                    h, current_time = self.ode_step(h, delta_t_, current_time, 
+                                                    last_X=last_X, tau=tau)
+
+                # Storing the predictions.
+                if return_path:
+                    path_t.append(current_time)
+                    path_h.append(h)
+                    path_y.append(self.readout_map(h))
+    #########################Modified##############
+            # predict the label probabilities at the end of the timeserie
+            # note that until_T has always to be true
+            label_prob = self.classification_readout(h)
+
+        if get_loss:
+
+            loss = loss + torch.nn.CrossEntropyLoss()(label_prob,torch.Tensor(label).type(torch.long))
+    ###################################################    
+        if return_path:
+            # path dimension: [time_steps, batch_size, output_size]
+            return h, loss, np.array(path_t), torch.stack(path_h), \
+                   torch.stack(path_y),label_prob
+        else:
+            return h, loss,label_prob
+
+
+    def evaluate(self, times, time_ptr, X, obs_idx, delta_t, T, start_X, 
+                 n_obs_ot, stockmodel, cond_exp_fun_kwargs=None,
+                 diff_fun=lambda x,y: np.mean((x-y)**2),
+                 return_paths=False, M=None):
+        """
+        evaluate the model at its current training state against the true
+        conditional expectation
+        :param times: see forward
+        :param time_ptr: see forward
+        :param X: see forward
+        :param obs_idx: see forward
+        :param delta_t: see forward
+        :param T: see forward
+        :param start_X: see forward
+        :param n_obs_ot: see forward
+        :param stockmodel: stock_model.StockModel instance, used to compute true
+                cond. exp.
+        :param cond_exp_fun_kwargs: dict, the kwargs for the cond. exp. function
+                currently not used
+        :param diff_fun: function, to compute difference between optimal and
+                predicted cond. exp
+        :param return_paths: bool, whether to return also the paths
+        :param M: see forward
+        :return: eval-loss, if wanted paths t, y for true and pred
+        """
+        self.eval()
+        _, _, path_t, path_h, path_y = self.forward(
+            times, time_ptr,X,obs_idx, delta_t, T, start_X, None, 
+            return_path=True, get_loss=False, until_T=True, M=M)
+
+        loss, true_path_t, true_path_y = stockmodel.compute_cond_exp(
+            times, time_ptr, X.detach().numpy(), obs_idx.detach().numpy(),
+            delta_t, T, start_X.detach().numpy(), n_obs_ot.detach().numpy(),
+            return_path=True, get_loss=False)
+
+        eval_loss = diff_fun(
+            path_y.detach().numpy(), true_path_y
+        )
+        if return_paths:
+            return eval_loss, path_t, true_path_t, path_y, true_path_y
+        else:
+            return eval_loss
+
+    def get_pred(self, times, time_ptr, X, obs_idx, delta_t, T, start_X,
+                 M=None):
+        """
+        get predicted path
+        :param times: see forward
+        :param time_ptr: see forward
+        :param X: see forward
+        :param obs_idx: see forward
+        :param delta_t: see forward
+        :param T: see forward
+        :param start_X: see forward
+        :param M: see forward
+        :return: dict, with prediction y and times t
+        """
+        self.eval()
+        _, _, _, _, _, label_prob = self.forward(times, time_ptr, X, obs_idx,
+                                                    delta_t, T, start_X, None,
+                                                    return_path=True,
+                                                    get_loss=False,
+                                                    until_T=True, M=M)
+        return label_prob
 
 
 
