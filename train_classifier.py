@@ -494,6 +494,8 @@ def train(
         print('start training ...')
     metric_app = []
     while model.epoch <= epochs:
+        train_acc = 0
+        train_obs = 0
         t = time.time()
         model.train()  # set model in train mode (e.g. BatchNorm)
         for i, b in tqdm.tqdm(enumerate(dl)):
@@ -516,7 +518,7 @@ def train(
             n_obs_ot = torch.tensor(n_obs_ot).to(device)
 
             if 'other_model' not in options:
-                hT, loss, label_prob = model(
+                hT, loss, label_prob, batch_acc = model(
                     times, time_ptr, X, obs_idx, delta_t, T, start_X, n_obs_ot,
                     label, return_path=False, get_loss=True
                 )
@@ -528,6 +530,10 @@ def train(
                 )
             else:
                 raise ValueError
+
+            train_acc += batch_acc
+            train_obs += 1
+
             loss.backward()
             optimizer.step()
         train_time = time.time() - t
@@ -539,6 +545,7 @@ def train(
             loss_val = 0
             num_obs = 0
             eval_msd = 0
+            eval_acc = 0
             model.eval()  # set model in evaluation mode
             for i, b in enumerate(dl_val):
                 if plot:
@@ -551,13 +558,13 @@ def train(
                 n_obs_ot = b["n_obs_ot"].to(device)
                 label = b['labels']
                 if 'other_model' not in options:
-                    hT, c_loss, label_prob = model(
+                    hT, c_loss, label_prob, batch_acc = model(
                         times, time_ptr, X, obs_idx, delta_t, T, start_X,
-                        n_obs_ot,label, return_path=False, get_loss=True
+                        n_obs_ot, label, return_path=False, get_loss=True
                     )
                 elif options['other_model'] == "GRU_ODE_Bayes":
                     M = torch.ones_like(X)
-                    hT, c_loss, _, _ = model(
+                    hT, c_loss, _, _, _ = model(
                         times, time_ptr, X, M, obs_idx, delta_t, T, start_X,
                         return_path=False, smoother=False
                     )
@@ -565,22 +572,25 @@ def train(
                     raise ValueError
 
                 loss_val += c_loss.detach().numpy()
+                eval_acc += batch_acc
                 num_obs += 1
 
                 # mean squared difference evaluation
                 if 'evaluate' in options and options['evaluate']:
                     _eval_msd = model.evaluate(
                         times, time_ptr, X, obs_idx, delta_t, T, start_X,
-                        n_obs_ot, stockmodel, return_paths=False)
+                        n_obs_ot, label, stockmodel, return_paths=False)
                     eval_msd += _eval_msd
 
             eval_time = time.time() - t
             loss_val = loss_val / num_obs
             eval_msd = eval_msd / num_obs
+            eval_acc = eval_acc / num_obs
             train_loss = loss.detach().numpy()
+            train_acc = train_acc / train_obs
             print("epoch {}, weight={:.5f}, train-loss={:.5f}, "
-                  "optimal-eval-loss={:.5f}, eval-loss={:.5f}, ".format(
-                model.epoch, model.weight, train_loss, opt_eval_loss, loss_val))
+                  "optimal-eval-loss={:.5f}, eval-loss={:.5f}, train-acc={:.5f}, eval-acc={:.5f}".format(
+                model.epoch, model.weight, train_loss, opt_eval_loss, loss_val, train_acc, eval_acc))
         if 'evaluate' in options and options['evaluate']:
             metric_app.append([model.epoch, train_time, eval_time, train_loss,
                               loss_val, opt_eval_loss, eval_msd])
