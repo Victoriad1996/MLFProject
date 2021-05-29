@@ -856,16 +856,16 @@ class NJODE_classification(torch.nn.Module):
             # note that until_T has always to be true
             label_prob = self.classification_readout(h)
 
-        if get_loss:
+            batch_acc = 1 - torch.mean(np.abs(torch.argmax(label_prob, dim=1).detach() - label))
 
-            loss = loss + torch.nn.CrossEntropyLoss()(label_prob,torch.Tensor(label).type(torch.long))
-    ###################################################    
+        if get_loss:
+            loss = loss + torch.nn.CrossEntropyLoss()(label_prob, label.type(torch.LongTensor))
         if return_path:
             # path dimension: [time_steps, batch_size, output_size]
             return h, loss, np.array(path_t), torch.stack(path_h), \
-                   torch.stack(path_y),label_prob
+                   torch.stack(path_y), label_prob, batch_acc
         else:
-            return h, loss,label_prob
+            return h, loss, label_prob, batch_acc
 
 
     def evaluate(self, times, time_ptr, X, obs_idx, delta_t, T, start_X, 
