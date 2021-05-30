@@ -67,7 +67,7 @@ data_path = data_utils.data_path
 saved_models_path = '{}saved_models/'.format(data_path)
 
 METR_COLUMNS = ['epoch', 'train_time', 'eval_time', 'train_loss', 'eval_loss',
-                'optimal_eval_loss']
+                'eval_accuracy','optimal_eval_loss','optimal_eval_accuracy']
 default_ode_nn = ((50, 'tanh'), (50, 'tanh'))
 default_readout_nn = ((50, 'tanh'), (50, 'tanh'))
 default_enc_nn = ((50, 'tanh'), (50, 'tanh'))
@@ -205,8 +205,8 @@ def train(
         cudnn.deterministic = True
 
     # set number of CPUs
-    if SERVER:
-        torch.set_num_threads(N_CPUS)
+    N_CPUS = 1
+    torch.set_num_threads(N_CPUS)
 
     # get the device for torch
     if torch.cuda.is_available():
@@ -225,6 +225,7 @@ def train(
                                                 time_id=dataset_id)
     input_size = dataset_metadata['dimension']
     output_size = input_size
+    #print('input/output size:' + str(input_size))
     T = dataset_metadata['maturity']
     delta_t = dataset_metadata['dt']
 
@@ -402,7 +403,7 @@ def train(
                                  weight_decay=0.0005)
 
     # load saved model if wanted/possible
-    best_eval_loss = np.infty
+    best_eval_accuracy = 0
     if 'evaluate' in options and options['evaluate']:
         metr_columns = METR_COLUMNS + ['evaluation_mean_diff']
     else:
@@ -421,7 +422,7 @@ def train(
                 models.get_ckpt_model(model_path_save_last, model, optimizer,
                                       device)
             df_metric = pd.read_csv(model_metric_file, index_col=0)
-            best_eval_loss = np.min(df_metric['eval_loss'].values)
+            best_eval_accuracy = np.max(df_metric['eval_accuracy'].values)
             model.epoch += 1
             model.weight_decay_step()
             initial_print += '\nepoch: {}, weight: {}'.format(
@@ -494,8 +495,6 @@ def train(
         print('start training ...')
     metric_app = []
     while model.epoch <= epochs:
-        train_acc = 0
-        train_obs = 0
         t = time.time()
         model.train()  # set model in train mode (e.g. BatchNorm)
         for i, b in tqdm.tqdm(enumerate(dl)):
@@ -518,7 +517,7 @@ def train(
             n_obs_ot = torch.tensor(n_obs_ot).to(device)
 
             if 'other_model' not in options:
-                hT, loss, label_prob, batch_acc = model(
+                hT, loss, label_prob = model(
                     times, time_ptr, X, obs_idx, delta_t, T, start_X, n_obs_ot,
                     label, return_path=False, get_loss=True
                 )
@@ -530,10 +529,6 @@ def train(
                 )
             else:
                 raise ValueError
-
-            train_acc += batch_acc
-            train_obs += 1
-
             loss.backward()
             optimizer.step()
         train_time = time.time() - t
@@ -545,7 +540,6 @@ def train(
             loss_val = 0
             num_obs = 0
             eval_msd = 0
-            eval_acc = 0
             model.eval()  # set model in evaluation mode
             for i, b in enumerate(dl_val):
                 if plot:
@@ -558,13 +552,14 @@ def train(
                 n_obs_ot = b["n_obs_ot"].to(device)
                 label = b['labels']
                 if 'other_model' not in options:
-                    hT, c_loss, label_prob, batch_acc = model(
+                    hT, c_loss, label_prob = model(
                         times, time_ptr, X, obs_idx, delta_t, T, start_X,
-                        n_obs_ot, label, return_path=False, get_loss=True
+                        n_obs_ot,label, return_path=False, get_loss=True
                     )
+                    accuracy_eval = 1-torch.mean(np.abs(torch.argmax(label_prob,dim=1).detach()-label)) 
                 elif options['other_model'] == "GRU_ODE_Bayes":
                     M = torch.ones_like(X)
-                    hT, c_loss, _, _, _ = model(
+                    hT, c_loss, _, _ = model(
                         times, time_ptr, X, M, obs_idx, delta_t, T, start_X,
                         return_path=False, smoother=False
                     )
@@ -572,25 +567,22 @@ def train(
                     raise ValueError
 
                 loss_val += c_loss.detach().numpy()
-                eval_acc += batch_acc
                 num_obs += 1
 
                 # mean squared difference evaluation
                 if 'evaluate' in options and options['evaluate']:
                     _eval_msd = model.evaluate(
                         times, time_ptr, X, obs_idx, delta_t, T, start_X,
-                        n_obs_ot, label, stockmodel, return_paths=False)
+                        n_obs_ot, stockmodel, return_paths=False)
                     eval_msd += _eval_msd
 
             eval_time = time.time() - t
             loss_val = loss_val / num_obs
             eval_msd = eval_msd / num_obs
-            eval_acc = eval_acc / num_obs
             train_loss = loss.detach().numpy()
-            train_acc = train_acc / train_obs
             print("epoch {}, weight={:.5f}, train-loss={:.5f}, "
-                  "optimal-eval-loss={:.5f}, eval-loss={:.5f}, train-acc={:.5f}, eval-acc={:.5f}".format(
-                model.epoch, model.weight, train_loss, opt_eval_loss, loss_val, train_acc, eval_acc))
+                  "optimal-eval-loss={:.5f}, eval-loss={:.5f}, ".format(
+                model.epoch, model.weight, train_loss, opt_eval_loss, loss_val))
         if 'evaluate' in options and options['evaluate']:
             metric_app.append([model.epoch, train_time, eval_time, train_loss,
                               loss_val, opt_eval_loss, eval_msd])
@@ -598,7 +590,7 @@ def train(
                 eval_msd))
         else:
             metric_app.append([model.epoch, train_time, eval_time, train_loss,
-                               loss_val, opt_eval_loss])
+                               loss_val, accuracy_eval,opt_eval_loss,best_eval_accuracy])
 
         # save model
         if model.epoch % save_every == 0:
@@ -624,10 +616,10 @@ def train(
                                    model.epoch)
             metric_app = []
             print('saved!')
-        if loss_val < best_eval_loss:
-            print('save new best model: last-best-loss: {:.5f}, '
-                  'new-best-loss: {:.5f}, epoch: {}'.format(
-                best_eval_loss, loss_val, model.epoch))
+        if accuracy_eval > best_eval_accuracy:
+            print('save new best model: last-best-accuracy: {:.5f}, '
+                  'new-best-accuracy: {:.5f}, epoch: {}'.format(
+                best_eval_accuracy, accuracy_eval, model.epoch))
             df_m_app = pd.DataFrame(data=metric_app, columns=metr_columns)
             df_metric = pd.concat([df_metric, df_m_app], ignore_index=True)
             df_metric.to_csv(model_metric_file)
@@ -636,7 +628,7 @@ def train(
             models.save_checkpoint(model, optimizer, model_path_save_best,
                                    model.epoch)
             metric_app = []
-            best_eval_loss = loss_val
+            best_eval_accuracy = accuracy_eval
             print('saved!')
 
         model.epoch += 1
@@ -818,13 +810,14 @@ def plot_one_path_with_pred(
 
 if __name__ == '__main__':
 
-    # dataset_id = 1590868206
-    # dataset_id = 1591027769
-    dataset_id = 1621867777
-    dataset = "BlackScholes_mixed"
-    # dataset = "Heston"
-    # dataset = "HestonWOFeller"
+    #dataset_id = 1621935452
+    #dataset = "BlackScholes_mixed"
 
+
+## 2D dataset
+    dataset = "BlackScholes_mixed"
+    dataset_id = 1622037568
+    
     # # create datasat if does not exists
     # dataset_dict = data_utils.hyperparam_default
     # dataset_dict['nb_paths'] = 20000
