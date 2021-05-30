@@ -856,16 +856,24 @@ class NJODE_classification(torch.nn.Module):
             # note that until_T has always to be true
             label_prob = self.classification_readout(h)
 
-            batch_acc = 1 - torch.mean(np.abs(torch.argmax(label_prob, dim=1).detach() - label))
-
         if get_loss:
-            loss = loss + torch.nn.CrossEntropyLoss()(label_prob, label.type(torch.LongTensor))
+            #print('path loss: %f\n',(loss))
+            #print('label loss: %f\n',(torch.nn.CrossEntropyLoss()(label_prob,torch.Tensor(label).type(torch.long))))
+            ## The label loss is around 0.5 while the other loss is between 2 and 10. It seems
+            ## that the model optimizes only the other loss and the label_loss does not show
+            ## any significant imporvement (at least during the firsts epochs). Try to balance this
+            ## using a constant lambda in the loss
+            accuracy_train = 1-torch.mean(np.abs(torch.argmax(label_prob,dim=1).detach()-label)).detach().numpy()
+            print('Training Accuracy:'+str(accuracy_train))
+            lamda = 5
+            loss = loss + lamda*torch.nn.CrossEntropyLoss()(label_prob,torch.Tensor(label).type(torch.long))
+    ###################################################    
         if return_path:
             # path dimension: [time_steps, batch_size, output_size]
             return h, loss, np.array(path_t), torch.stack(path_h), \
-                   torch.stack(path_y), label_prob, batch_acc
+                   torch.stack(path_y),label_prob
         else:
-            return h, loss, label_prob, batch_acc
+            return h, loss,label_prob
 
 
     def evaluate(self, times, time_ptr, X, obs_idx, delta_t, T, start_X, 
@@ -926,8 +934,11 @@ class NJODE_classification(torch.nn.Module):
         :return: dict, with prediction y and times t
         """
         self.eval()
+        ##add label as input to forward, but the value is not used 
+        ## to compute the label_prob label = np.zeros(start_X.shape[0])
         _, _, _, _, _, label_prob = self.forward(times, time_ptr, X, obs_idx,
                                                     delta_t, T, start_X, None,
+                                                    None,
                                                     return_path=True,
                                                     get_loss=False,
                                                     until_T=True, M=M)
