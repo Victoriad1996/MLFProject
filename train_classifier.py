@@ -541,6 +541,7 @@ def train(
             num_obs = 0
             eval_msd = 0
             model.eval()  # set model in evaluation mode
+            accuracy_eval = 0
             for i, b in enumerate(dl_val):
                 if plot:
                     batch = b
@@ -556,7 +557,7 @@ def train(
                         times, time_ptr, X, obs_idx, delta_t, T, start_X,
                         n_obs_ot,label, return_path=False, get_loss=True
                     )
-                    accuracy_eval = 1-torch.mean(np.abs(torch.argmax(label_prob,dim=1).detach()-label)) 
+                    accuracy_eval = accuracy_eval + (1/len(dl_val))*(1-torch.mean(np.abs(torch.argmax(label_prob,dim=1).detach()-label))) 
                 elif options['other_model'] == "GRU_ODE_Bayes":
                     M = torch.ones_like(X)
                     hT, c_loss, _, _ = model(
@@ -575,14 +576,14 @@ def train(
                         times, time_ptr, X, obs_idx, delta_t, T, start_X,
                         n_obs_ot, stockmodel, return_paths=False)
                     eval_msd += _eval_msd
-
+            
             eval_time = time.time() - t
             loss_val = loss_val / num_obs
             eval_msd = eval_msd / num_obs
             train_loss = loss.detach().numpy()
             print("epoch {}, weight={:.5f}, train-loss={:.5f}, "
-                  "optimal-eval-loss={:.5f}, eval-loss={:.5f}, ".format(
-                model.epoch, model.weight, train_loss, opt_eval_loss, loss_val))
+                  "optimal-eval-loss={:.5f}, eval-loss={:.5f}, eval-accuracy ={:.5f} ".format(
+                model.epoch, model.weight, train_loss, opt_eval_loss, loss_val,accuracy_eval))
         if 'evaluate' in options and options['evaluate']:
             metric_app.append([model.epoch, train_time, eval_time, train_loss,
                               loss_val, opt_eval_loss, eval_msd])
@@ -815,8 +816,8 @@ if __name__ == '__main__':
 
 
 ## 2D dataset
-    dataset = "BlackScholes_mixed"
-    dataset_id = 1622037568
+    dataset = "BlackScholes-corr"
+    dataset_id = 1622380257
     
     # # create datasat if does not exists
     # dataset_dict = data_utils.hyperparam_default
