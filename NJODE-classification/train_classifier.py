@@ -813,13 +813,13 @@ def plot_one_path_with_pred(
 if __name__ == '__main__':
 
 ## 1D dataset
-    #dataset_id = 1621935452
-    #dataset = "BlackScholes_mixed"
+    dataset_id = 1621935452
+    dataset = "BlackScholes_mixed"
 
 
 ## 2D dataset
-    dataset = "BlackScholes-corr"
-    dataset_id = 1622380257
+    #dataset = "BlackScholes-corr"
+    #dataset_id = 1622380257
     
     # # create datasat if does not exists
     # dataset_dict = data_utils.hyperparam_default
