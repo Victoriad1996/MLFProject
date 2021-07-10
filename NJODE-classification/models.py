@@ -686,8 +686,15 @@ class NJODE_classification(torch.nn.Module):
             input_size, hidden_size, enc_nn, dropout_rate, bias,
             masked=self.masked,
             residual=self.residual_enc_dec)
+        # self.encoder_map = RNN(
+        #     input_size, hidden_size, hidden_size, enc_nn, dropout_rate, bias,
+        #     masked=self.masked,
+        #     residual=self.residual_enc_dec)
         self.readout_map = FFNN(
             hidden_size, output_size, readout_nn, dropout_rate, bias, 
+            residual=self.residual_enc_dec)
+        self.jump_RNN = RNN(
+            input_size, hidden_size, hidden_size, readout_nn, dropout_rate, bias, 
             residual=self.residual_enc_dec)
         if self.use_rnn:  # TODO: implement that also this can be used with mask
             self.obs_c = GRUCell(input_size, hidden_size, bias=bias)
@@ -799,6 +806,8 @@ class NJODE_classification(torch.nn.Module):
 
             # Using RNNCell to update h. Also updating loss, tau and last_X
             Y_bj = self.readout_map(h)
+            #print(list(h.size()))
+            #print(list(X_obs.size()))
             if self.use_rnn:
                 h = self.obs_c(h, X_obs, i_obs)
             else:
@@ -806,9 +815,9 @@ class NJODE_classification(torch.nn.Module):
                 if self.masked:
                     X_obs_impute = X_obs * M_obs + \
                                    (torch.ones_like(M_obs) - M_obs)*Y_bj[i_obs]
-                    temp[i_obs] = self.encoder_map(X_obs_impute, M_obs)
+                    temp[i_obs] = self.jump_RNN(X_obs_impute,h[i_obs,:], M_obs)
                 else:
-                    temp[i_obs] = self.encoder_map(X_obs)
+                    temp[i_obs] = self.jump_RNN(X_obs,h[i_obs,:])
                 h = temp
             Y = self.readout_map(h)
             
@@ -943,6 +952,65 @@ class NJODE_classification(torch.nn.Module):
                                                     get_loss=False,
                                                     until_T=True, M=M)
         return label_prob
+
+class RNN(torch.nn.Module):
+    """
+    Implements feed-forward neural networks with tanh applied to inputs and the
+    option to use a residual NN version (then the output size needs to be a
+    multiple of the input size or vice versa)
+    """
+    def __init__(self, input_size, output_size,hidden_size, nn_desc, dropout_rate=0.0,
+                 bias=True, residual=False, masked=False):
+        super().__init__()
+
+        # create feed-forward NN
+        in_size = input_size + hidden_size
+        if masked:
+            in_size = 2*input_size +hidden_size
+        self.masked = masked
+        self.ffnn = get_ffnn(
+            input_size=in_size, output_size=output_size,
+            nn_desc=nn_desc, dropout_rate=dropout_rate, bias=bias
+        )
+
+        if residual:
+            print('use residual network: input_size={}, output_size={}'.format(
+                input_size, output_size))
+            if input_size <= output_size:
+                if output_size % input_size == 0:
+                    self.case = 1
+                    self.mult = int(output_size / input_size)
+                else:
+                    raise ValueError('for residual: output_size needs to be '
+                                     'multiple of input_size')
+
+            if input_size > output_size:
+                if input_size % output_size == 0:
+                    self.case = 2
+                    self.mult = int(input_size / output_size)
+                else:
+                    raise ValueError('for residual: input_size needs to be '
+                                     'multiple of output_size')
+        else:
+            self.case = 0
+            
+    def forward(self, nn_input, h, mask=None):
+        if self.masked:
+            assert mask is not None
+            out = self.ffnn(torch.cat((torch.tanh(nn_input), mask,h), 1))
+        else:
+            out = self.ffnn(torch.cat((torch.tanh(nn_input),h),1))
+
+        if self.case == 0:
+            return out
+        elif self.case == 1:
+            identity = nn_input.repeat(1, self.mult)
+            return identity + out
+        elif self.case == 2:
+            identity = torch.mean(torch.stack(nn_input.chunk(self.mult, dim=1)),
+                                  dim=0)
+            return identity + out
+
 
 
 
